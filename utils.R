@@ -1,5 +1,7 @@
-library('furrr')
-library('future')
+library(furrr)
+library(future)
+library(Rcpp)
+sourceCpp("cpp_bn.cpp")
 
 ma <- function(arr, n=10){
   res = arr
@@ -12,67 +14,105 @@ ma <- function(arr, n=10){
 # Dado o numero de linhas e colunas de uma matriz, gerar uma simulação
 # do arima com os parametros passados como lista em `ar_param_list`
 compute_mdser <-
-    function(nrows, ncols, ar_param_list) {
-        matrix_na <-
-            matrix(rep(NA), 
-                      nrow = nrows,
-                      ncol = ncols)
-        for(i in 1:nrows) {
-            matrix_na[i, ] <- arima.sim(n=ncols, model=ar_param_list)
-        }
-        return(matrix_na)
+  function(nrows, ncols, ar_param_list) {
+    matrix_na <-
+      matrix(rep(NA), 
+             nrow = nrows,
+             ncol = ncols)
+    for(i in 1:nrows) {
+      matrix_na[i, ] <- arima.sim(n=ncols, model=ar_param_list)
     }
+    return(matrix_na)
+  }
 
 compute_acf <-
-    function(nrows, lag_max_acf, mdser) {
-
-        matrix_na <-
-            matrix(rep(NA), 
-                   nrow = nrows,
-                   ncol = lag_max_acf+1)
-        for(i in 1:nrows) {
-            serie <- mdser[i, ]
-            serie_ma <- serie-ma(serie)
-            aux <- NULL
-            aux <- acf(serie_ma, plot=FALSE, lag.max=lag_max_acf)$acf
-            matrix_na[i, ] <- aux
-        }
-        return(matrix_na)
+  function(nrows, lag_max_acf, mdser) {
+    
+    matrix_na <-
+      matrix(rep(NA), 
+             nrow = nrows,
+             ncol = lag_max_acf+1)
+    for(i in 1:nrows) {
+      serie <- mdser[i, ]
+      serie_ma <- serie-ma(serie)
+      aux <- NULL
+      aux <- acf(serie_ma, plot=FALSE, lag.max=lag_max_acf)$acf
+      matrix_na[i, ] <- aux
     }
+    return(matrix_na)
+  }
 
 compute_v_bn <-
-    function(matrix_batch) {
-  
-        bn_per <- furrr::future_map(
-            1:nrow(matrix_batch),
-            function(idx) {
-                group_id_aux <- rep(0, nrow(matrix_batch))
-                group_id_aux[idx] <- 1
+  function(matrix_batch) {
+    matrix_dist <- as.matrix(dist(matrix_batch)^2)
+    
+    bn_per <- furrr::future_map(
+      1:nrow(matrix_batch),
+      function(idx) {
+        group_id_aux <- rep(0, nrow(matrix_batch))
+        group_id_aux[idx] <- 1
+        
+        bn_per_idx <- bn(group_id_aux, md = matrix_dist)
+        
+        return(bn_per_idx)
+      },
+      .options = furrr::furrr_options(seed = NULL)
+    )
+    return(var(unlist(bn_per), na.rm = T))
+  }
 
-                bn_per_idx <- bn(group_id_aux, data=matrix_batch)
-
-                return(bn_per_idx)
-            },
-            .options = furrr::furrr_options(seed=NULL)
-        )
-        return(var(unlist(bn_per), na.rm = T))
-}
+compute_v_bn_cpp <-
+  function(matrix_batch) {
+    matrix_dist <- as.matrix(dist(matrix_batch)^2)
+    
+    bn_per <- purrr::map(
+      1:nrow(matrix_batch),
+      function(idx) {
+        group_id_aux <- rep(0, nrow(matrix_batch))
+        group_id_aux[idx] <- 1
+        
+        bn_per_idx <- cpp_bn(group_id_aux, matrix_dist)
+        
+        return(bn_per_idx)
+      }
+    )
+    return(var(unlist(bn_per), na.rm = T))
+  }
 
 compute_bn_pad <-
-    function(md_h0, md_h1, pad) {
+  function(md_h0, md_h1, pad) {
+    
+    bn_new_pad <-
+      furrr::future_map(
+        1:nrow(md_h1),
+        function(idx) {
+          bn_new <-
+            uclust::bn(group_id = c(rep(0,nrow(md_h0)),1),
+                       data=rbind(md_h0, md_h1[idx, ]))
+          return(bn_new/pad)
+        }
+      )
+    return(unlist(bn_new_pad))
+  }
 
-        bn_new_pad <-
-            furrr::future_map(
-                1:nrow(md_h1),
-                function(idx) {
-                    bn_new <-
-                        uclust::bn(group_id = c(rep(0,nrow(md_h0)),1),
-                                   data=rbind(md_h0, md_h1[idx, ]))
-                    return(bn_new/pad)
-                }
+compute_bn_pad_cpp <-
+  function(md_h0, md_h1, pad) {
+    bn_new_pad <-
+      purrr::map(
+        1:nrow(md_h1),
+        function(idx) {
+          dt <- rbind(md_h0, md_h1[idx, ])
+          mat_dist <- as.matrix(dist(dt)^2)
+          bn_new <-
+            cpp_bn(
+              group_id = c(rep(0, nrow(md_h0)), 1),
+              md = mat_dist
             )
-        return(unlist(bn_new_pad))
-    }
+          return(bn_new / pad)
+        }
+      )
+    return(unlist(bn_new_pad))
+  }
 
 compute_results <-
   function(lista_das_listas, lista_alfa, n_orig, alfa_h1) {
